@@ -50,9 +50,14 @@ def _request_proxy(proxy_url: str) -> dict[str, str] | None:
     except ValueError:
         has_credentials = True
     if has_credentials:
-        logger.warning(
-            "flaresolverr request.get cannot carry authenticated proxy {}; "
-            "configure PROXY_URL, PROXY_USERNAME and PROXY_PASSWORD in FlareSolverr",
+        # FlareSolverr's request.get schema deliberately rejects credentials in
+        # the request body.  The service-level PROXY_* variables are the
+        # supported path, so this is an expected delegation rather than a
+        # failed proxy request.  Keep it at debug level; a warning here made a
+        # correctly configured FlareSolverr instance look broken on every
+        # clearance refresh.
+        logger.debug(
+            "flaresolverr request.get delegated authenticated proxy to service env: proxy={}",
             _redact_proxy_url(raw),
         )
         return None

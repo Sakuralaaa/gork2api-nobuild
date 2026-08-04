@@ -10,11 +10,14 @@ from app.control.account.models import AccountRecord
 from app.products.openai.console import (
     _CONSOLE_FIXED_EFFORT,
     _build_console_headers,
+    _is_cloudflare_forbidden,
     _console_status_message,
+    _proxy_feedback_kind,
     console_upstream_model,
     is_console_basic_model,
 )
 from app.control.proxy import _clearance_host, _normalize_clearance_origin
+from app.control.proxy.models import ProxyFeedbackKind
 from app.products._account_selection import mode_candidates
 
 openai_router_module = import_module("app.products.openai.router")
@@ -139,6 +142,24 @@ class ConsoleModelSelectionTests(unittest.TestCase):
         self.assertNotIn("console.cf_cookies", message)
         self.assertIn("SSO token", message)
         self.assertIn("egress IP consistency", message)
+
+    def test_console_empty_403_is_account_forbidden_not_clearance_challenge(self):
+        response = SimpleNamespace(headers={"server": "granian"})
+
+        self.assertFalse(_is_cloudflare_forbidden(response, ""))
+        self.assertEqual(
+            _proxy_feedback_kind(403, response=response, body=""),
+            ProxyFeedbackKind.FORBIDDEN,
+        )
+
+    def test_console_cloudflare_403_invalidates_clearance(self):
+        response = SimpleNamespace(headers={"server": "cloudflare", "cf-ray": "ray"})
+
+        self.assertTrue(_is_cloudflare_forbidden(response, ""))
+        self.assertEqual(
+            _proxy_feedback_kind(403, response=response, body=""),
+            ProxyFeedbackKind.CHALLENGE,
+        )
 
 
 class ConsoleModelListTests(unittest.IsolatedAsyncioTestCase):

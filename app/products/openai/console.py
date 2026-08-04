@@ -10,6 +10,7 @@ import re
 import string
 import uuid
 from typing import Any, AsyncGenerator, AsyncIterable
+from urllib.parse import urlsplit
 
 import orjson
 
@@ -405,13 +406,104 @@ def _build_console_headers(token: str, lease) -> dict[str, str]:
     return headers
 
 
-def _proxy_feedback_kind(status: int | None):
+def _response_headers(response: Any) -> dict[str, str]:
+    try:
+        return {
+            str(key).lower(): str(value)
+            for key, value in response.headers.items()
+        }
+    except Exception:
+        return {}
+
+
+def _is_cloudflare_forbidden(response: Any, body: str = "") -> bool:
+    """Return whether a 403 has recognizable Cloudflare challenge markers."""
+    headers = _response_headers(response)
+    if "cf-ray" in headers or "cf-mitigated" in headers:
+        return True
+    if any(key.startswith("cf-") for key in headers):
+        return True
+    server = headers.get("server", "").lower()
+    if "cloudflare" in server:
+        return True
+    body_lower = (body or "").lower()
+    return any(
+        marker in body_lower
+        for marker in ("cloudflare", "challenge-platform", "cf-chl-", "just a moment")
+    )
+
+
+def _cookie_names(cookie_header: str) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in (cookie_header or "").split(";"):
+        name, separator, _ = item.strip().partition("=")
+        if separator and name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _redact_proxy_url(proxy_url: str | None) -> str:
+    raw = str(proxy_url or "").strip()
+    if not raw:
+        return "direct"
+    try:
+        parsed = urlsplit(raw)
+        host = parsed.hostname or "configured"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme or 'proxy'}://{host}{port}"
+    except ValueError:
+        return "configured"
+
+
+def _log_console_forbidden_diagnostics(
+    response: Any,
+    *,
+    body: str,
+    model: str,
+    lease: Any,
+    session_kwargs: dict[str, Any],
+) -> None:
+    headers = _response_headers(response)
+    cf_header_names = tuple(sorted(key for key in headers if key.startswith("cf-")))
+    cookies = _cookie_names(str(getattr(lease, "cf_cookies", "") or ""))
+    user_agent = _lease_user_agent(lease)
+    major = ""
+    match = re.search(r"(?:Chrome|Chromium|Edg|Firefox)/([0-9]+)", user_agent)
+    if match:
+        major = match.group(1)
+    logger.warning(
+        "console 403 diagnostics: model={} server={} content_type={} "
+        "cf_ray_present={} cf_headers={} clearance_host={} cookie_names={} "
+        "ua_major={} impersonate={} proxy={}",
+        model,
+        headers.get("server", ""),
+        headers.get("content-type", ""),
+        bool(headers.get("cf-ray")),
+        cf_header_names,
+        getattr(lease, "clearance_host", ""),
+        cookies,
+        major,
+        session_kwargs.get("impersonate", ""),
+        _redact_proxy_url(getattr(lease, "proxy_url", "")),
+    )
+
+
+def _proxy_feedback_kind(status: int | None, *, response: Any = None, body: str = ""):
     from app.control.proxy.models import ProxyFeedbackKind
 
     if status == 429:
         return ProxyFeedbackKind.RATE_LIMITED
     if status == 403:
-        return ProxyFeedbackKind.CHALLENGE
+        # A Console API 403 is not necessarily a Cloudflare challenge.  An
+        # empty 403 from the upstream is commonly an account/model denial; do
+        # not throw away a valid clearance bundle in that case.
+        return (
+            ProxyFeedbackKind.CHALLENGE
+            if response is not None and _is_cloudflare_forbidden(response, body)
+            else ProxyFeedbackKind.FORBIDDEN
+        )
     if status == 401:
         return ProxyFeedbackKind.UNAUTHORIZED
     if status and status >= 500:
@@ -487,10 +579,21 @@ async def _post_console_json(
                         console_upstream_model(model),
                         body,
                     )
+                    _log_console_forbidden_diagnostics(
+                        response,
+                        body=body,
+                        model=model,
+                        lease=lease,
+                        session_kwargs=session_kwargs,
+                    )
                 await proxy.feedback(
                     lease,
                     ProxyFeedback(
-                        kind=_proxy_feedback_kind(response.status_code),
+                        kind=_proxy_feedback_kind(
+                            response.status_code,
+                            response=response,
+                            body=body,
+                        ),
                         status_code=response.status_code,
                     ),
                 )
@@ -555,10 +658,21 @@ async def _post_console_stream(
                     console_upstream_model(model),
                     body,
                 )
+                _log_console_forbidden_diagnostics(
+                    response,
+                    body=body,
+                    model=model,
+                    lease=lease,
+                    session_kwargs=session_kwargs,
+                )
             await proxy.feedback(
                 lease,
                 ProxyFeedback(
-                    kind=_proxy_feedback_kind(response.status_code),
+                    kind=_proxy_feedback_kind(
+                        response.status_code,
+                        response=response,
+                        body=body,
+                    ),
                     status_code=response.status_code,
                 ),
             )
