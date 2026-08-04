@@ -14,6 +14,7 @@ from app.products.openai.console import (
     console_upstream_model,
     is_console_basic_model,
 )
+from app.control.proxy import _clearance_host, _normalize_clearance_origin
 from app.products._account_selection import mode_candidates
 
 openai_router_module = import_module("app.products.openai.router")
@@ -62,6 +63,13 @@ def _fake_request():
 
 
 class ConsoleModelSelectionTests(unittest.TestCase):
+    def test_clearance_origin_is_normalized_to_absolute_https_url(self):
+        self.assertEqual(
+            _normalize_clearance_origin("console.x.ai"),
+            "https://console.x.ai",
+        )
+        self.assertEqual(_clearance_host("console.x.ai"), "console.x.ai")
+
     def test_console_models_use_existing_virtual_quota_buckets(self):
         cases = {
             "grok-4.20-fast-console": 2,

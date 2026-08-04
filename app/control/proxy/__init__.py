@@ -31,8 +31,21 @@ _DEFAULT_CLEARANCE_ORIGIN = "https://grok.com"
 BundleKey = tuple[str, str]
 
 
+def _normalize_clearance_origin(clearance_origin: str | None) -> str:
+    """Return an absolute HTTPS origin for browser clearance requests."""
+    raw = str(clearance_origin or _DEFAULT_CLEARANCE_ORIGIN).strip()
+    if not raw:
+        return _DEFAULT_CLEARANCE_ORIGIN
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return raw
+    if raw.startswith("//"):
+        return f"https:{raw}"
+    return f"https://{raw.lstrip('/')}"
+
+
 def _clearance_host(clearance_origin: str | None) -> str:
-    host = urlparse(clearance_origin or _DEFAULT_CLEARANCE_ORIGIN).hostname
+    host = urlparse(_normalize_clearance_origin(clearance_origin)).hostname
     return (host or "grok.com").lower()
 
 
@@ -159,6 +172,7 @@ class ProxyDirectory:
 
         For DIRECT mode, returns a lease with no proxy or clearance.
         """
+        clearance_origin = _normalize_clearance_origin(clearance_origin)
         proxy_url = await self._pick_proxy_url(resource=resource)
         affinity = proxy_url or "direct"
         clearance_host = _clearance_host(clearance_origin)
@@ -251,6 +265,7 @@ class ProxyDirectory:
     ) -> ClearanceBundle | None:
         if self._clearance_mode == ClearanceMode.NONE:
             return None
+        clearance_origin = _normalize_clearance_origin(clearance_origin)
         clearance_host = _clearance_host(clearance_origin)
         key: BundleKey = (affinity_key, clearance_host)
 
