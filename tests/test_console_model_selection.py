@@ -9,6 +9,7 @@ from app.control.model import registry
 from app.control.account.models import AccountRecord
 from app.products.openai.console import (
     _CONSOLE_FIXED_EFFORT,
+    _build_console_headers,
     _console_status_message,
     console_upstream_model,
     is_console_basic_model,
@@ -110,6 +111,25 @@ class ConsoleModelSelectionTests(unittest.TestCase):
         )
         self.assertIn("upstream is currently unavailable", message)
         self.assertIn("grok-4.5", message)
+
+    def test_console_headers_reuse_clearance_lease_user_agent(self):
+        lease = SimpleNamespace(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+            ),
+            cf_cookies="cf_clearance=clearance-value",
+        )
+
+        headers = _build_console_headers("sso-token", lease)
+
+        self.assertEqual(headers["User-Agent"], lease.user_agent)
+
+    def test_console_403_message_does_not_reference_nonexistent_cookie_setting(self):
+        message = _console_status_message(403)
+
+        self.assertNotIn("console.cf_cookies", message)
+        self.assertIn("egress IP consistency", message)
 
 
 class ConsoleModelListTests(unittest.IsolatedAsyncioTestCase):

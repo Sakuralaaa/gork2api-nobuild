@@ -22,7 +22,10 @@ from app.control.account.console_usage import (
     increment_console_usage,
 )
 from app.dataplane.proxy.adapters.headers import build_sso_cookie
-from app.dataplane.proxy.adapters.profile import extract_cookie_value
+from app.dataplane.proxy.adapters.profile import (
+    browser_from_user_agent,
+    extract_cookie_value,
+)
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
@@ -260,14 +263,30 @@ def _console_referer() -> str:
     return "https://console.x.ai/"
 
 
-def _console_user_agent() -> str:
+def _lease_user_agent(lease: Any | None) -> str:
+    return str(getattr(lease, "user_agent", "") or "").strip()
+
+
+def _console_user_agent(lease: Any | None = None) -> str:
+    # FlareSolverr returns the browser identity that was used to obtain the
+    # clearance cookie.  Reuse it for Console requests so the Cookie and
+    # User-Agent remain one browser session.  The configured Console value is
+    # only a fallback for manual/disabled clearance modes.
+    lease_user_agent = _lease_user_agent(lease)
+    if lease_user_agent:
+        return lease_user_agent
     return get_config().get_str(
         "console.user_agent",
         _DEFAULT_CONSOLE_USER_AGENT,
     ).strip() or _DEFAULT_CONSOLE_USER_AGENT
 
 
-def _console_browser_override() -> str | None:
+def _console_browser_override(lease: Any | None = None) -> str | None:
+    lease_user_agent = _lease_user_agent(lease)
+    if lease_user_agent:
+        browser = browser_from_user_agent(lease_user_agent)
+        if browser:
+            return browser
     browser = get_config().get_str("console.browser", "").strip()
     return browser or _DEFAULT_CONSOLE_BROWSER
 
@@ -361,8 +380,8 @@ def _build_console_payload(
     return orjson.dumps(payload)
 
 
-def _build_console_headers(token: str, _lease) -> dict[str, str]:
-    user_agent = _console_user_agent()
+def _build_console_headers(token: str, lease) -> dict[str, str]:
+    user_agent = _console_user_agent(lease)
     headers = {
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br, zstd",
@@ -422,9 +441,9 @@ def _console_status_message(
         )
     if status == 403:
         return (
-            "Console upstream returned 403; console.x.ai requires a valid "
-            "Cloudflare/browser session. Configure console.cf_cookies and "
-            "console.user_agent from the same browser session."
+            "Console upstream returned 403; console.x.ai rejected the "
+            "Cloudflare/browser session. Check FlareSolverr clearance, the "
+            "Console browser identity, and egress IP consistency."
         )
     if model and upstream_model:
         return f"Console upstream returned {status} for {model} ({upstream_model})"
@@ -446,7 +465,7 @@ async def _post_console_json(
     headers = _build_console_headers(token, lease)
     session_kwargs = build_session_kwargs(
         lease=lease,
-        browser_override=_console_browser_override(),
+        browser_override=_console_browser_override(lease),
     )
 
     try:
@@ -507,7 +526,7 @@ async def _post_console_stream(
     headers = _build_console_headers(token, lease)
     session_kwargs = build_session_kwargs(
         lease=lease,
-        browser_override=_console_browser_override(),
+        browser_override=_console_browser_override(lease),
     )
     session = ResettableSession(**session_kwargs)
 
