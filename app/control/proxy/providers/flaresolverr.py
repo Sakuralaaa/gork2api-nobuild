@@ -4,7 +4,7 @@ import asyncio
 import json
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
@@ -13,6 +13,50 @@ from ..models import ClearanceBundle, ClearanceMode
 
 def _extract_all_cookies(cookies: list[dict]) -> str:
     return "; ".join(f"{c.get('name')}={c.get('value')}" for c in cookies)
+
+
+def _redact_proxy_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "<direct>"
+    try:
+        parsed = urlsplit(raw)
+        hostname = parsed.hostname
+        if not parsed.scheme or not hostname:
+            return "<configured>"
+        if ":" in hostname and not hostname.startswith("["):
+            hostname = f"[{hostname}]"
+        netloc = hostname
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except ValueError:
+        return "<configured>"
+
+
+def _request_proxy(proxy_url: str) -> dict[str, str] | None:
+    """Build a request.get proxy only when it has no credentials.
+
+    FlareSolverr's request.get API does not support authenticated proxies in
+    the request body. Authenticated global proxies must be configured through
+    PROXY_URL, PROXY_USERNAME and PROXY_PASSWORD in the FlareSolverr service.
+    """
+    raw = str(proxy_url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+        has_credentials = parsed.username is not None or parsed.password is not None
+    except ValueError:
+        has_credentials = True
+    if has_credentials:
+        logger.warning(
+            "flaresolverr request.get cannot carry authenticated proxy {}; "
+            "configure PROXY_URL, PROXY_USERNAME and PROXY_PASSWORD in FlareSolverr",
+            _redact_proxy_url(raw),
+        )
+        return None
+    return {"url": raw}
 
 
 class FlareSolverrClearanceProvider:
@@ -41,9 +85,10 @@ class FlareSolverrClearanceProvider:
             target_url  = target_url,
         )
         if not result:
+            safe_proxy = _redact_proxy_url(proxy_url or affinity_key)
             logger.warning(
                 "flaresolverr clearance refresh failed: affinity={} proxy={} target={}",
-                affinity_key, proxy_url or "<direct>", target_url,
+                safe_proxy, safe_proxy, target_url,
             )
             return None
         host = result.get("clearance_host", "grok.com")
@@ -70,8 +115,8 @@ class FlareSolverrClearanceProvider:
             "url":        target,
             "maxTimeout": timeout_sec * 1000,
         }
-        if proxy_url:
-            payload["proxy"] = {"url": proxy_url}
+        if proxy := _request_proxy(proxy_url):
+            payload["proxy"] = proxy
 
         body    = json.dumps(payload).encode()
         request = urllib_request.Request(
