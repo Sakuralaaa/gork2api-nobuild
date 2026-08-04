@@ -388,7 +388,7 @@ def _build_console_headers(token: str, lease) -> dict[str, str]:
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
         "Authorization": "Bearer anonymous",
         "Content-Type": "application/json",
-        "Cookie": _console_sso_cookie(token, lease=_lease),
+        "Cookie": _console_sso_cookie(token, lease=lease),
         "Origin": "https://console.x.ai",
         "Priority": "u=1, i",
         "Referer": _console_referer(),
