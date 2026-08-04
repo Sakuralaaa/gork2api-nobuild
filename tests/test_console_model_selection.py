@@ -143,6 +143,19 @@ class ConsoleModelSelectionTests(unittest.TestCase):
         self.assertIn("SSO token", message)
         self.assertIn("egress IP consistency", message)
 
+    def test_console_dpop_required_response_is_explained(self):
+        message = _console_status_message(
+            403,
+            body=(
+                '{"code":"unauthorized:dpop-required",'
+                '"error":"DPoP proof required but was not verified."}'
+            ),
+        )
+
+        self.assertIn("unauthorized:dpop-required", message)
+        self.assertIn("DPoP key and proof", message)
+        self.assertNotIn("Check the SSO token", message)
+
     def test_console_empty_403_is_account_forbidden_not_clearance_challenge(self):
         response = SimpleNamespace(headers={"server": "granian"})
 

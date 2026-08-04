@@ -526,6 +526,7 @@ def _console_status_message(
     *,
     model: str | None = None,
     upstream_model: str | None = None,
+    body: str = "",
 ) -> str:
     if status == 404 and model == "grok-4.5-console":
         return (
@@ -533,6 +534,19 @@ def _console_status_message(
             "(404 from grok-4.5)."
         )
     if status == 403:
+        body_lower = (body or "").lower()
+        if "unauthorized:dpop-required" in body_lower or (
+            "dpop" in body_lower
+            and "proof required" in body_lower
+            and "not verified" in body_lower
+        ):
+            return (
+                "Console upstream requires a verified DPoP proof "
+                "(unauthorized:dpop-required). The current SSO/FlareSolverr "
+                "flow supplies cookies and Cloudflare clearance, but not the "
+                "Console browser's DPoP key and proof; changing the User-Agent, "
+                "cookies, or proxy alone cannot satisfy this check."
+            )
         return (
             "Console upstream returned 403; console.x.ai rejected the selected "
             "account or browser session. Check the SSO token, FlareSolverr "
@@ -602,6 +616,7 @@ async def _post_console_json(
                         response.status_code,
                         model=model,
                         upstream_model=console_upstream_model(model),
+                        body=body,
                     ),
                     status=response.status_code,
                     body=body,
@@ -682,6 +697,7 @@ async def _post_console_stream(
                     response.status_code,
                     model=model,
                     upstream_model=console_upstream_model(model),
+                    body=body,
                 ),
                 status=response.status_code,
                 body=body,
