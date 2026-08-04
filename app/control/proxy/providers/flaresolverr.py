@@ -94,13 +94,38 @@ class FlareSolverrClearanceProvider:
                 )
                 return None
 
-            solution = result.get("solution", {})
-            cookies  = solution.get("cookies", [])
-            if not cookies:
-                logger.warning("flaresolverr returned no cookies")
+            solution = result.get("solution") or {}
+            if not isinstance(solution, dict):
+                logger.warning("flaresolverr returned an invalid solution")
                 return None
 
-            ua = solution.get("userAgent", "") or ""
+            cookies = solution.get("cookies") or []
+            ua = str(solution.get("userAgent") or "").strip()
+            try:
+                solution_status = int(solution.get("status") or 0)
+            except (TypeError, ValueError):
+                solution_status = 0
+
+            # FlareSolverr legitimately returns no cookies when the target is
+            # reachable without a Cloudflare challenge.  Keep the successful
+            # browser identity in that case so callers still use the same
+            # User-Agent and browser fingerprint instead of falling back to a
+            # different configured session.
+            if not cookies and not 200 <= solution_status < 400:
+                logger.warning(
+                    "flaresolverr returned no cookies for a non-success solution: "
+                    "target={} solution_status={}",
+                    target,
+                    solution_status,
+                )
+                return None
+            if not cookies:
+                logger.info(
+                    "flaresolverr challenge not detected: target={} user_agent_present={}",
+                    target,
+                    bool(ua),
+                )
+
             host = (urlparse(target).hostname or "").lower()
             filtered = [
                 cookie for cookie in cookies
