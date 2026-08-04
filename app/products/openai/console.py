@@ -10,6 +10,7 @@ import re
 import string
 import uuid
 from typing import Any, AsyncGenerator, AsyncIterable
+from urllib.parse import urlsplit
 
 import orjson
 
@@ -21,6 +22,7 @@ from app.control.account.console_usage import (
     console_usage_key_for_model,
     increment_console_usage,
 )
+from app.control.proxy.models import ProxyFeedbackKind
 from app.dataplane.proxy.adapters.headers import build_sso_cookie
 from app.dataplane.proxy.adapters.profile import (
     browser_from_user_agent,
@@ -43,6 +45,7 @@ from ._format import (
     make_stream_chunk,
     make_thinking_chunk,
 )
+from .dpop import DpopMintError, mint_dpop_credentials
 
 
 _BASIC_POOL_ID = 0
@@ -245,6 +248,11 @@ def _console_url() -> str:
     return get_config().get_str("console.responses_url", "https://console.x.ai/v1/responses")
 
 
+def _console_dpop_token_url() -> str:
+    parsed = urlsplit(_console_url())
+    return f"{parsed.scheme}://{parsed.netloc}/v1/dpop/token"
+
+
 def _console_cluster() -> str:
     return get_config().get_str("console.cluster", "https://us-east-1.api.x.ai")
 
@@ -405,18 +413,156 @@ def _build_console_headers(token: str, lease) -> dict[str, str]:
     return headers
 
 
-def _proxy_feedback_kind(status: int | None):
-    from app.control.proxy.models import ProxyFeedbackKind
+def _response_headers(response: Any) -> dict[str, str]:
+    try:
+        return {
+            str(key).lower(): str(value)
+            for key, value in response.headers.items()
+        }
+    except Exception:
+        return {}
 
+
+def _is_cloudflare_forbidden(response: Any, body: str = "") -> bool:
+    """Return whether a 403 has recognizable Cloudflare challenge markers."""
+    headers = _response_headers(response)
+    if "cf-ray" in headers or "cf-mitigated" in headers:
+        return True
+    if any(key.startswith("cf-") for key in headers):
+        return True
+    server = headers.get("server", "").lower()
+    if "cloudflare" in server:
+        return True
+    body_lower = (body or "").lower()
+    return any(
+        marker in body_lower
+        for marker in ("cloudflare", "challenge-platform", "cf-chl-", "just a moment")
+    )
+
+
+def _cookie_names(cookie_header: str) -> tuple[str, ...]:
+    names: list[str] = []
+    for item in (cookie_header or "").split(";"):
+        name, separator, _ = item.strip().partition("=")
+        if separator and name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _redact_proxy_url(proxy_url: str | None) -> str:
+    raw = str(proxy_url or "").strip()
+    if not raw:
+        return "direct"
+    try:
+        parsed = urlsplit(raw)
+        host = parsed.hostname or "configured"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme or 'proxy'}://{host}{port}"
+    except ValueError:
+        return "configured"
+
+
+def _log_console_forbidden_diagnostics(
+    response: Any,
+    *,
+    body: str,
+    model: str,
+    lease: Any,
+    session_kwargs: dict[str, Any],
+) -> None:
+    headers = _response_headers(response)
+    cf_header_names = tuple(sorted(key for key in headers if key.startswith("cf-")))
+    cookies = _cookie_names(str(getattr(lease, "cf_cookies", "") or ""))
+    user_agent = _lease_user_agent(lease)
+    major = ""
+    match = re.search(r"(?:Chrome|Chromium|Edg|Firefox)/([0-9]+)", user_agent)
+    if match:
+        major = match.group(1)
+    logger.warning(
+        "console 403 diagnostics: model={} server={} content_type={} "
+        "cf_ray_present={} cf_headers={} clearance_host={} cookie_names={} "
+        "ua_major={} impersonate={} proxy={}",
+        model,
+        headers.get("server", ""),
+        headers.get("content-type", ""),
+        bool(headers.get("cf-ray")),
+        cf_header_names,
+        getattr(lease, "clearance_host", ""),
+        cookies,
+        major,
+        session_kwargs.get("impersonate", ""),
+        _redact_proxy_url(getattr(lease, "proxy_url", "")),
+    )
+
+
+def _proxy_feedback_kind(status: int | None, *, response: Any = None, body: str = ""):
     if status == 429:
         return ProxyFeedbackKind.RATE_LIMITED
     if status == 403:
-        return ProxyFeedbackKind.CHALLENGE
+        # A Console API 403 is not necessarily a Cloudflare challenge.  An
+        # empty 403 from the upstream is commonly an account/model denial; do
+        # not throw away a valid clearance bundle in that case.
+        return (
+            ProxyFeedbackKind.CHALLENGE
+            if response is not None and _is_cloudflare_forbidden(response, body)
+            else ProxyFeedbackKind.FORBIDDEN
+        )
     if status == 401:
         return ProxyFeedbackKind.UNAUTHORIZED
     if status and status >= 500:
         return ProxyFeedbackKind.UPSTREAM_5XX
     return ProxyFeedbackKind.TRANSPORT_ERROR
+
+
+def _console_dpop_mint_message(status: int) -> str:
+    if status == 403:
+        return (
+            "Console DPoP token mint returned 403; the SSO/Cloudflare session "
+            "was rejected before the Console request could be signed. Refresh "
+            "the SSO and FlareSolverr clearance from the same browser session."
+        )
+    return f"Console DPoP token mint returned {status}"
+
+
+async def _build_console_dpop_headers(
+    session: Any,
+    *,
+    headers: dict[str, str],
+    proxy: Any,
+    lease: Any,
+    timeout_s: float,
+    request_url: str,
+) -> dict[str, str]:
+    from app.control.proxy.models import ProxyFeedback
+
+    try:
+        credentials = await mint_dpop_credentials(
+            session,
+            url=_console_dpop_token_url(),
+            headers=headers,
+            timeout_s=timeout_s,
+        )
+    except DpopMintError as exc:
+        await proxy.feedback(
+            lease,
+            ProxyFeedback(
+                kind=_proxy_feedback_kind(exc.status, body=exc.body),
+                status_code=exc.status,
+            ),
+        )
+        raise UpstreamError(
+            _console_dpop_mint_message(exc.status),
+            status=exc.status,
+            body=exc.body,
+        ) from exc
+
+    authenticated_headers = dict(headers)
+    authenticated_headers.update(
+        credentials.headers(method="POST", url=request_url)
+    )
+    return authenticated_headers
 
 
 def _feedback_kind_for_status(status: int) -> FeedbackKind:
@@ -434,6 +580,7 @@ def _console_status_message(
     *,
     model: str | None = None,
     upstream_model: str | None = None,
+    body: str = "",
 ) -> str:
     if status == 404 and model == "grok-4.5-console":
         return (
@@ -441,6 +588,19 @@ def _console_status_message(
             "(404 from grok-4.5)."
         )
     if status == 403:
+        body_lower = (body or "").lower()
+        if "unauthorized:dpop-required" in body_lower or (
+            "dpop" in body_lower
+            and "proof required" in body_lower
+            and "not verified" in body_lower
+        ):
+            return (
+                "Console upstream requires a verified DPoP proof "
+                "(unauthorized:dpop-required). The current SSO/FlareSolverr "
+                "flow supplies cookies and Cloudflare clearance, but not the "
+                "Console browser's DPoP key and proof; changing the User-Agent, "
+                "cookies, or proxy alone cannot satisfy this check."
+            )
         return (
             "Console upstream returned 403; console.x.ai rejected the selected "
             "account or browser session. Check the SSO token, FlareSolverr "
@@ -471,6 +631,14 @@ async def _post_console_json(
 
     try:
         async with ResettableSession(**session_kwargs) as session:
+            headers = await _build_console_dpop_headers(
+                session,
+                headers=headers,
+                proxy=proxy,
+                lease=lease,
+                timeout_s=timeout_s,
+                request_url=_console_url(),
+            )
             response = await session.post(
                 _console_url(),
                 headers=headers,
@@ -487,10 +655,21 @@ async def _post_console_json(
                         console_upstream_model(model),
                         body,
                     )
+                    _log_console_forbidden_diagnostics(
+                        response,
+                        body=body,
+                        model=model,
+                        lease=lease,
+                        session_kwargs=session_kwargs,
+                    )
                 await proxy.feedback(
                     lease,
                     ProxyFeedback(
-                        kind=_proxy_feedback_kind(response.status_code),
+                        kind=_proxy_feedback_kind(
+                            response.status_code,
+                            response=response,
+                            body=body,
+                        ),
                         status_code=response.status_code,
                     ),
                 )
@@ -499,6 +678,7 @@ async def _post_console_json(
                         response.status_code,
                         model=model,
                         upstream_model=console_upstream_model(model),
+                        body=body,
                     ),
                     status=response.status_code,
                     body=body,
@@ -539,6 +719,14 @@ async def _post_console_stream(
     session = ResettableSession(**session_kwargs)
 
     try:
+        headers = await _build_console_dpop_headers(
+            session,
+            headers=headers,
+            proxy=proxy,
+            lease=lease,
+            timeout_s=timeout_s,
+            request_url=_console_url(),
+        )
         response = await session.post(
             _console_url(),
             headers=headers,
@@ -555,10 +743,21 @@ async def _post_console_stream(
                     console_upstream_model(model),
                     body,
                 )
+                _log_console_forbidden_diagnostics(
+                    response,
+                    body=body,
+                    model=model,
+                    lease=lease,
+                    session_kwargs=session_kwargs,
+                )
             await proxy.feedback(
                 lease,
                 ProxyFeedback(
-                    kind=_proxy_feedback_kind(response.status_code),
+                    kind=_proxy_feedback_kind(
+                        response.status_code,
+                        response=response,
+                        body=body,
+                    ),
                     status_code=response.status_code,
                 ),
             )
@@ -568,6 +767,7 @@ async def _post_console_stream(
                     response.status_code,
                     model=model,
                     upstream_model=console_upstream_model(model),
+                    body=body,
                 ),
                 status=response.status_code,
                 body=body,
