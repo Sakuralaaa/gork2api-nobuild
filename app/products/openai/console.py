@@ -44,6 +44,7 @@ from ._format import (
     make_stream_chunk,
     make_thinking_chunk,
 )
+from .dpop import DpopMintError, mint_dpop_credentials
 
 
 _BASIC_POOL_ID = 0
@@ -244,6 +245,11 @@ def _console_reasoning_effort(model: str, reasoning_effort: str | None) -> str:
 
 def _console_url() -> str:
     return get_config().get_str("console.responses_url", "https://console.x.ai/v1/responses")
+
+
+def _console_dpop_token_url() -> str:
+    parsed = urlsplit(_console_url())
+    return f"{parsed.scheme}://{parsed.netloc}/v1/dpop/token"
 
 
 def _console_cluster() -> str:
@@ -511,6 +517,55 @@ def _proxy_feedback_kind(status: int | None, *, response: Any = None, body: str 
     return ProxyFeedbackKind.TRANSPORT_ERROR
 
 
+def _console_dpop_mint_message(status: int) -> str:
+    if status == 403:
+        return (
+            "Console DPoP token mint returned 403; the SSO/Cloudflare session "
+            "was rejected before the Console request could be signed. Refresh "
+            "the SSO and FlareSolverr clearance from the same browser session."
+        )
+    return f"Console DPoP token mint returned {status}"
+
+
+async def _build_console_dpop_headers(
+    session: Any,
+    *,
+    headers: dict[str, str],
+    proxy: Any,
+    lease: Any,
+    timeout_s: float,
+    request_url: str,
+) -> dict[str, str]:
+    from app.control.proxy.models import ProxyFeedback
+
+    try:
+        credentials = await mint_dpop_credentials(
+            session,
+            url=_console_dpop_token_url(),
+            headers=headers,
+            timeout_s=timeout_s,
+        )
+    except DpopMintError as exc:
+        await proxy.feedback(
+            lease,
+            ProxyFeedback(
+                kind=_proxy_feedback_kind(exc.status, body=exc.body),
+                status_code=exc.status,
+            ),
+        )
+        raise UpstreamError(
+            _console_dpop_mint_message(exc.status),
+            status=exc.status,
+            body=exc.body,
+        ) from exc
+
+    authenticated_headers = dict(headers)
+    authenticated_headers.update(
+        credentials.headers(method="POST", url=request_url)
+    )
+    return authenticated_headers
+
+
 def _feedback_kind_for_status(status: int) -> FeedbackKind:
     if status == 429:
         return FeedbackKind.RATE_LIMITED
@@ -577,6 +632,14 @@ async def _post_console_json(
 
     try:
         async with ResettableSession(**session_kwargs) as session:
+            headers = await _build_console_dpop_headers(
+                session,
+                headers=headers,
+                proxy=proxy,
+                lease=lease,
+                timeout_s=timeout_s,
+                request_url=_console_url(),
+            )
             response = await session.post(
                 _console_url(),
                 headers=headers,
@@ -657,6 +720,14 @@ async def _post_console_stream(
     session = ResettableSession(**session_kwargs)
 
     try:
+        headers = await _build_console_dpop_headers(
+            session,
+            headers=headers,
+            proxy=proxy,
+            lease=lease,
+            timeout_s=timeout_s,
+            request_url=_console_url(),
+        )
         response = await session.post(
             _console_url(),
             headers=headers,
