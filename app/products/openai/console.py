@@ -22,6 +22,7 @@ from app.control.account.console_usage import (
     console_usage_key_for_model,
     increment_console_usage,
 )
+from app.control.proxy.models import ProxyFeedbackKind
 from app.dataplane.proxy.adapters.headers import build_sso_cookie
 from app.dataplane.proxy.adapters.profile import (
     browser_from_user_agent,
@@ -497,8 +498,6 @@ def _log_console_forbidden_diagnostics(
 
 
 def _proxy_feedback_kind(status: int | None, *, response: Any = None, body: str = ""):
-    from app.control.proxy.models import ProxyFeedbackKind
-
     if status == 429:
         return ProxyFeedbackKind.RATE_LIMITED
     if status == 403:
