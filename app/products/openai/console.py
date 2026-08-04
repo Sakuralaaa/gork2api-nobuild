@@ -112,6 +112,7 @@ _CONSOLE_MODELS_WITH_REASONING_FIELD = frozenset({
 _CONSOLE_MAX_OUTPUT_TOKENS: dict[str, int] = {
     "grok-4.20-multi-agent-0309": 2_000_000,
 }
+_CONSOLE_RETRYABLE_STATUSES = frozenset({401, 403, 429, 503})
 
 
 class NoBasicConsoleAccount(Exception):
@@ -441,9 +442,9 @@ def _console_status_message(
         )
     if status == 403:
         return (
-            "Console upstream returned 403; console.x.ai rejected the "
-            "Cloudflare/browser session. Check FlareSolverr clearance, the "
-            "Console browser identity, and egress IP consistency."
+            "Console upstream returned 403; console.x.ai rejected the selected "
+            "account or browser session. Check the SSO token, FlareSolverr "
+            "clearance, Console browser identity, and egress IP consistency."
         )
     if model and upstream_model:
         return f"Console upstream returned {status} for {model} ({upstream_model})"
@@ -479,6 +480,13 @@ async def _post_console_json(
             body_bytes = response.content
             if response.status_code != 200:
                 body = body_bytes.decode("utf-8", "replace")[:400]
+                if response.status_code == 403:
+                    logger.warning(
+                        "console upstream 403: model={} upstream_model={} body={}",
+                        model,
+                        console_upstream_model(model),
+                        body,
+                    )
                 await proxy.feedback(
                     lease,
                     ProxyFeedback(
@@ -540,6 +548,13 @@ async def _post_console_stream(
         )
         if response.status_code != 200:
             body = response.content.decode("utf-8", "replace")[:400]
+            if response.status_code == 403:
+                logger.warning(
+                    "console upstream 403: model={} upstream_model={} body={}",
+                    model,
+                    console_upstream_model(model),
+                    body,
+                )
             await proxy.feedback(
                 lease,
                 ProxyFeedback(
@@ -976,7 +991,7 @@ async def maybe_create_response(
         except UpstreamError as exc:
             fail_exc = exc
             last_exc = exc
-            if exc.status not in {429, 401, 503} or attempt >= max_retries:
+            if exc.status not in _CONSOLE_RETRYABLE_STATUSES or attempt >= max_retries:
                 raise
             logger.warning(
                 "console basic response retry scheduled: attempt={}/{} status={} token={}...",

@@ -137,6 +137,7 @@ class ConsoleModelSelectionTests(unittest.TestCase):
         message = _console_status_message(403)
 
         self.assertNotIn("console.cf_cookies", message)
+        self.assertIn("SSO token", message)
         self.assertIn("egress IP consistency", message)
 
 
