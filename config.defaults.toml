@@ -138,6 +138,8 @@ max_inflight = 8
 timeout = 60
 # 文本对话上游传输：mgw（WebSocket，正文所在）| http（旧 SSE，仅工具帧）
 transport = "mgw"
+# mgw 链路是否禁用 web 搜索（true=直接回答，不联网检索）
+mgw_disable_search = false
 
 
 # ==================== Console Responses 旁路 ====================

@@ -239,23 +239,23 @@ def _chunk_frames(chunk: Any) -> list[tuple[str, bool]]:
 
 
 def _session_object(model: str) -> dict[str, Any]:
-    return {
-        "model": model,
-        "x_grok": {
-            "protocol_capabilities": ["conversation_attached", "custom_methods_v1"],
-            "use_chunk": True,
-            "enable_side_by_side": True,
-            "force_side_by_side": False,
-            "enable_image_generation": True,
-            "image_generation_count": 2,
-            "disable_text_follow_ups": False,
-            "disable_artifact": True,
-            "force_concise": False,
-            "keep_context": False,
-            "is_temporary": True,
-            "disable_memory": True,
-        },
+    x_grok: dict[str, Any] = {
+        "protocol_capabilities": ["conversation_attached", "custom_methods_v1"],
+        "use_chunk": True,
+        "enable_side_by_side": True,
+        "force_side_by_side": False,
+        "enable_image_generation": True,
+        "image_generation_count": 2,
+        "disable_text_follow_ups": False,
+        "disable_artifact": True,
+        "force_concise": False,
+        "keep_context": False,
+        "is_temporary": True,
+        "disable_memory": True,
     }
+    if get_config().get_bool("chat.mgw_disable_search", False):
+        x_grok["disable_search"] = True
+    return {"model": model, "x_grok": x_grok}
 
 
 def _session_create_event(model: str) -> dict[str, Any]:
@@ -320,6 +320,12 @@ def _trace_mgw_event(event_type: str, event: dict[str, Any]) -> str:
         for key in ("tool_usage_card", "tool_result", "render_citation"):
             if isinstance(chunk.get(key), dict):
                 parts.append(key)
+        metadata = chunk.get("metadata")
+        if isinstance(metadata, dict):
+            parts.append("metadata=" + ",".join(sorted(metadata.keys()))[:200])
+            for key in ("is_final", "status", "search_round", "tool_call_id", "reason", "type"):
+                if key in metadata:
+                    parts.append(f"md.{key}={str(metadata[key])[:60]!r}")
     for key in ("delta", "text", "status", "result"):
         if key in event:
             value = event[key]
