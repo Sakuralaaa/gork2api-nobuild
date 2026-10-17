@@ -136,6 +136,8 @@ max_inflight = 8
 # ==================== 对话配置 ====================
 [chat]
 timeout = 60
+# 文本对话上游传输：mgw（WebSocket，正文所在）| http（旧 SSE，仅工具帧）
+transport = "mgw"
 
 
 # ==================== Console Responses 旁路 ====================

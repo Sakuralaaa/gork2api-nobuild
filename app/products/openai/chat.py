@@ -389,6 +389,22 @@ async def _stream_chat(
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
     """Yield raw SSE lines from the Grok app-chat endpoint."""
+    # 新版 grok.com 已把文本正文迁到 mgw WebSocket；旧 SSE 端点只回工具帧。
+    # 纯文本请求默认走 mgw，附件请求仍走旧 HTTP 路径（附件尚未接入 mgw）。
+    from app.dataplane.reverse.protocol.xai_mgw import mgw_chat_stream, mgw_enabled
+
+    if not files and mgw_enabled():
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire()
+        async for line in mgw_chat_stream(
+            token=token,
+            model=mode_id.to_api_str(),
+            message=message,
+            lease=lease,
+            timeout_s=timeout_s,
+        ):
+            yield line
+        return
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire()
     attachments = await _prepare_file_attachments(token, files)
