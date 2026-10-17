@@ -286,6 +286,18 @@ def _item_event(session_id: str, message: str) -> dict[str, Any]:
     }
 
 
+def _apply_search_limit(message: str) -> str:
+    """按 chat.mgw_search_limit 在提示词里约束联网搜索轮次。"""
+    limit = get_config().get_int("chat.mgw_search_limit", 0)
+    if limit <= 0:
+        return message
+    return (
+        message
+        + f"\n\n请最多进行 {limit} 次联网搜索，然后立即基于已获得的信息"
+        + "给出最终答案，不要再继续搜索或打开更多页面。"
+    )
+
+
 def _response_event(session_id: str) -> dict[str, Any]:
     return {
         "session_id": session_id,
@@ -501,7 +513,7 @@ async def mgw_chat_stream(
                 turn_sent = True
                 active_session = session_id or frame_session
                 async with send_lock:
-                    await ws.send_json(_item_event(active_session, message))
+                    await ws.send_json(_item_event(active_session, _apply_search_limit(message)))
                     await ws.send_json(_response_event(active_session))
                 logger.info(
                     "mgw turn sent: session={} model={}", active_session, model
