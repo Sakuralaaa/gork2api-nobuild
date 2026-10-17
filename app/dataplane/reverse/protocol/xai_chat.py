@@ -231,6 +231,7 @@ class StreamAdapter:
         "_web_search_urls_seen",
         "thinking_buf",
         "text_buf",
+        "_raw_text",
         "image_urls",
     )
 
@@ -252,6 +253,7 @@ class StreamAdapter:
         self._web_search_urls_seen: set[str] = set()
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
+        self._raw_text: list[str] = []                 # 已输出的正文原文（用于 envelope 去重）
         self.image_urls: list[tuple[str, str]] = []   # [(url, imageUuid), ...]
 
     # 搜索信源追加：当配置启用且有 webSearchResults 时，格式化为 ## Sources 段落
@@ -426,12 +428,15 @@ class StreamAdapter:
             return events
 
         # ── final text token (needs cleaning) ─────────────────────
-        if token is not None and think is not True and tag == "final":
+        # 上游部分正文帧不带 messageTag（Go 侧同样接受空 tag）；只认 "final"
+        # 会把整段正文静默丢弃，表现为只有思考/搜索卡片而没有回答。
+        if token is not None and think is not True and tag in (None, "", "final"):
             self._content_started = True
             cleaned, local_anns = self._clean_token(token)
             if cleaned:
                 # 先发 text 事件（OpenAI 顺序：text.delta 先，annotation.added 后）
                 self.text_buf.append(cleaned)
+                self._raw_text.append(token)
                 events.append(FrameEvent("text", cleaned))
                 # 再发 annotation 事件：局部位置 → 绝对位置
                 for ann in local_anns:
@@ -441,6 +446,36 @@ class StreamAdapter:
                     events.append(FrameEvent("annotation", annotation_data=ann))
                 self._text_offset += len(cleaned)
             return events
+
+        # ── final envelope fallback ───────────────────────────────
+        # 部分上游响应不逐 token 下发正文，只在 modelResponse.message 中给出
+        # 完整文本（web_search 之后常见）。已流式输出的内容优先，只按前缀
+        # 增量补齐，避免重复。
+        model_response = resp.get("modelResponse")
+        if isinstance(model_response, dict):
+            message = model_response.get("message")
+            if isinstance(message, str) and message:
+                emitted = "".join(self._raw_text)
+                if not emitted:
+                    delta = message
+                elif message.startswith(emitted):
+                    delta = message[len(emitted):]
+                else:
+                    delta = ""
+                if delta:
+                    cleaned, local_anns = self._clean_token(delta)
+                    if cleaned:
+                        self._content_started = True
+                        self.text_buf.append(cleaned)
+                        self._raw_text.append(delta)
+                        events.append(FrameEvent("text", cleaned))
+                        for ann in local_anns:
+                            ann["start_index"] = self._text_offset + ann.pop("local_start")
+                            ann["end_index"] = self._text_offset + ann.pop("local_end")
+                            self._annotations.append(ann)
+                            events.append(FrameEvent("annotation", annotation_data=ann))
+                        self._text_offset += len(cleaned)
+                return events
 
         # ── end signals ───────────────────────────────────────────
         if resp.get("isSoftStop"):
