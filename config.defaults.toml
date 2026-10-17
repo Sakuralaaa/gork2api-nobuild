@@ -140,8 +140,8 @@ timeout = 60
 transport = "mgw"
 # mgw 链路是否禁用 web 搜索（true=直接回答，不联网检索）
 mgw_disable_search = false
-# mgw 联网搜索轮次软约束：0=不限制；>0 时在提示词里要求最多搜索 N 次后直接作答
-mgw_search_limit = 0
+# mgw 联网搜索轮次上限：0=不限制；>0 时要求最多搜索 N 次后直接作答（grok 官网约 3 次）
+mgw_search_limit = 3
 
 
 # ==================== Console Responses 旁路 ====================

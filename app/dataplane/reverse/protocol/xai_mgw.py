@@ -288,13 +288,15 @@ def _item_event(session_id: str, message: str) -> dict[str, Any]:
 
 def _apply_search_limit(message: str) -> str:
     """按 chat.mgw_search_limit 在提示词里约束联网搜索轮次。"""
-    limit = get_config().get_int("chat.mgw_search_limit", 0)
+    limit = get_config().get_int("chat.mgw_search_limit", 3)
     if limit <= 0:
         return message
     return (
         message
-        + f"\n\n请最多进行 {limit} 次联网搜索，然后立即基于已获得的信息"
-        + "给出最终答案，不要再继续搜索或打开更多页面。"
+        + f"\n\n【重要】最多只允许进行 {limit} 次联网搜索。达到 {limit} 次后必须"
+        + "立即停止搜索，直接基于已获得的信息给出最终答案；不要再搜索、"
+        + "不要打开更多页面。"
+    )
     )
 
 
