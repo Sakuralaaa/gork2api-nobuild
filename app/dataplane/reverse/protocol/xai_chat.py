@@ -448,10 +448,10 @@ class StreamAdapter:
             events.append(FrameEvent("soft_stop"))
             return events
 
-        if resp.get("finalMetadata"):
-            self._flush_pending_reasoning(events)
-            events.append(FrameEvent("soft_stop"))
-            return events
+        # NOTE: ``finalMetadata`` only marks the end of one upstream message
+        # step, not the end of the whole response. Grok emits it for every step
+        # of web chat models, so treating it as a stream terminator truncated
+        # long answers mid-generation. ``isSoftStop`` and EOF end the stream.
 
         return events
 
