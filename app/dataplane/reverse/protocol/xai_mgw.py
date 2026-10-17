@@ -297,7 +297,6 @@ def _apply_search_limit(message: str) -> str:
         + "立即停止搜索，直接基于已获得的信息给出最终答案；不要再搜索、"
         + "不要打开更多页面。"
     )
-    )
 
 
 def _response_event(session_id: str) -> dict[str, Any]:
