@@ -9,6 +9,7 @@ grok.com 已把文本对话的正文下发迁到 ``/ws/mgw`` 事件流；旧的
 无需改动即可复用（思考、工具卡片、搜索信源、正文、结束信号）。
 """
 
+import os
 import asyncio
 import time
 import uuid
@@ -39,6 +40,8 @@ _UID_CACHE: dict[str, str] = {}
 
 _ASSISTANT_CHANNEL = "CHANNEL_ASSISTANT_RESPONSE"
 _REASONING_MARKERS = ("ANALYSIS", "REASONING")
+
+_TRACE_MGW = os.getenv("GROK_TRACE_MGW", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def mgw_enabled() -> bool:
@@ -302,6 +305,34 @@ def _error_message(event: dict[str, Any]) -> str:
     return "Grok mgw 返回未知错误"
 
 
+def _trace_mgw_event(event_type: str, event: dict[str, Any]) -> str:
+    """脱敏记录单个 mgw 事件结构，仅用于定位正文/思考通道。"""
+    parts = [f"type={event_type or '<empty>'}"]
+    chunk = event.get("chunk")
+    if isinstance(chunk, dict):
+        parts.append("chunk=" + ",".join(sorted(chunk.keys()))[:200])
+        text = chunk.get("text")
+        if isinstance(text, dict):
+            parts.append(f"channel={text.get('channel')!r}")
+            value = text.get("text")
+            size = str(len(value)) if isinstance(value, str) else type(value).__name__
+            parts.append("textlen=" + size)
+        for key in ("tool_usage_card", "tool_result", "render_citation"):
+            if isinstance(chunk.get(key), dict):
+                parts.append(key)
+    for key in ("delta", "text", "status", "result"):
+        if key in event:
+            value = event[key]
+            size = str(len(value)) if isinstance(value, str) else type(value).__name__
+            parts.append(f"{key}={size}")
+    response = event.get("response")
+    if isinstance(response, dict):
+        parts.append("response=" + ",".join(sorted(response.keys()))[:160])
+    if event.get("error"):
+        parts.append("ERROR")
+    return " ".join(parts)
+
+
 async def _heartbeat(
     ws: aiohttp.ClientWebSocketResponse, lock: asyncio.Lock
 ) -> None:
@@ -396,6 +427,8 @@ async def mgw_chat_stream(
             event_type = str(event.get("type") or "")
             frame_session = envelope.get("session_id")
             frame_session = frame_session if isinstance(frame_session, str) else ""
+            if _TRACE_MGW:
+                logger.info("mgw event | {}", _trace_mgw_event(event_type, event))
 
             if event_type == "session.created":
                 created = True
@@ -440,6 +473,11 @@ async def mgw_chat_stream(
                     raise UpstreamError(
                         f"Grok mgw response 状态为 {status}", status=502
                     )
+                logger.info(
+                    "mgw response.done: status={} text_seen={}",
+                    status or "completed",
+                    text_seen,
+                )
                 yield _frame({"isSoftStop": True})
                 return
             elif event_type == "session.ended":
