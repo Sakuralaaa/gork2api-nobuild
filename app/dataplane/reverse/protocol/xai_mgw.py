@@ -395,6 +395,12 @@ async def mgw_chat_stream(
         initial = _session_create_event(model)
         async with send_lock:
             await ws.send_json(initial)
+        if _TRACE_MGW:
+            logger.info(
+                "mgw session.create sent | model={} x_grok={}",
+                model,
+                orjson.dumps(_session_object(model)["x_grok"]).decode(),
+            )
         heartbeat = asyncio.create_task(_heartbeat(ws, send_lock))
 
         created = False
@@ -491,7 +497,7 @@ async def mgw_chat_stream(
                 async with send_lock:
                     await ws.send_json(_item_event(active_session, message))
                     await ws.send_json(_response_event(active_session))
-                logger.debug(
+                logger.info(
                     "mgw turn sent: session={} model={}", active_session, model
                 )
         logger.warning(
