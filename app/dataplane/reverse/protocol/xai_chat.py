@@ -1,5 +1,6 @@
 """XAI app-chat protocol — payload builder and SSE stream adapter."""
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +13,46 @@ from app.platform.config.snapshot import get_config
 from app.control.model.enums import ModeId
 from app.dataplane.reverse.protocol.xai_chat_reasoning import ReasoningAggregator
 
+_TRACE_FRAMES = os.getenv("GROK_TRACE_FRAMES", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _trace_frame(obj: Any) -> str:
+    """Compact, content-free summary of one upstream frame (diagnostics only)."""
+    if not isinstance(obj, dict):
+        return f"type={type(obj).__name__}"
+    parts = [f"top={','.join(sorted(obj.keys()))[:160]}"]
+    result = obj.get("result")
+    if isinstance(result, dict):
+        parts.append(f"result={','.join(sorted(result.keys()))[:160]}")
+        resp = result.get("response")
+    else:
+        resp = obj.get("response")
+    if isinstance(resp, dict):
+        parts.append(f"resp={','.join(sorted(resp.keys()))[:260]}")
+        tag = resp.get("messageTag")
+        if tag is not None:
+            parts.append(f"tag={tag!r}")
+        if resp.get("isThinking") is True:
+            parts.append("think=1")
+        token = resp.get("token")
+        if isinstance(token, str):
+            parts.append(f"tok={len(token)}")
+        elif token is not None:
+            parts.append(f"tok={type(token).__name__}")
+        if resp.get("isSoftStop"):
+            parts.append("SOFT")
+        if resp.get("finalMetadata"):
+            parts.append("META")
+        mr = resp.get("modelResponse")
+        if isinstance(mr, dict):
+            msg = mr.get("message")
+            parts.append("MRkeys=" + ",".join(sorted(mr.keys()))[:180])
+            parts.append("MRmsg=" + (str(len(msg)) if isinstance(msg, str) else type(msg).__name__))
+    elif resp is not None:
+        parts.append(f"resp_type={type(resp).__name__}")
+    if obj.get("error"):
+        parts.append("TOP_ERROR")
+    return " ".join(parts)
 
 def build_chat_payload(
     *,
@@ -302,6 +343,8 @@ class StreamAdapter:
             obj = orjson.loads(data)
         except (orjson.JSONDecodeError, ValueError, TypeError):
             return []
+        if _TRACE_FRAMES:
+            logger.info("web frame | {}", _trace_frame(obj))
         raise_for_stream_error(obj)
 
         result = obj.get("result")
